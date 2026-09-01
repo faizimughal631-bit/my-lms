@@ -6,6 +6,7 @@
     <title>EduLearn Pro - Advanced Learning Management System</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         /* ============================================
            CSS VARIABLES & ROOT
@@ -2007,58 +2008,13 @@
         // ============================================
         class SecurityManager {
             constructor() {
-                this.salt = 'LMS_SECURE_SALT_2024_!@#$%';
                 this.sessionTimeout = 30 * 60 * 1000;
                 this.maxLoginAttempts = 5;
                 this.lockoutDuration = 60 * 1000;
                 this.failedAttempts = {};
                 this.sessionStartTime = null;
-                this.csrfToken = this.generateCSRFToken();
                 this.sessionInterval = null;
                 this.timerInterval = null;
-            }
-
-            generateCSRFToken() {
-                return Math.random().toString(36).substring(2) + Date.now().toString(36);
-            }
-
-            encrypt(data) {
-                try {
-                    const jsonStr = JSON.stringify(data);
-                    let encrypted = '';
-                    for (let i = 0; i < jsonStr.length; i++) {
-                        const charCode = jsonStr.charCodeAt(i) ^ this.salt.charCodeAt(i % this.salt.length);
-                        encrypted += String.fromCharCode(charCode);
-                    }
-                    return btoa(encrypted);
-                } catch (e) {
-                    return null;
-                }
-            }
-
-            decrypt(encryptedData) {
-                try {
-                    const decoded = atob(encryptedData);
-                    let decrypted = '';
-                    for (let i = 0; i < decoded.length; i++) {
-                        const charCode = decoded.charCodeAt(i) ^ this.salt.charCodeAt(i % this.salt.length);
-                        decrypted += String.fromCharCode(charCode);
-                    }
-                    return JSON.parse(decrypted);
-                } catch (e) {
-                    return null;
-                }
-            }
-
-            hashPassword(password) {
-                let hash = 0;
-                for (let i = 0; i < password.length; i++) {
-                    const char = password.charCodeAt(i);
-                    hash = ((hash << 5) - hash) + char;
-                    hash = hash & hash;
-                }
-                const saltedHash = hash + this.salt.length * 31;
-                return 'hashed_' + btoa(saltedHash.toString(16));
             }
 
             checkPasswordStrength(password) {
@@ -2197,10 +2153,34 @@
             generateSecureId() {
                 return Date.now().toString(36) + Math.random().toString(36).substring(2) + Math.random().toString(36).substring(2);
             }
+        }
 
-            verifyCSRFToken(token) {
-                return token === this.csrfToken;
-            }
+        // ============================================
+        // SUPABASE CONNECTION
+        // ============================================
+        // 👉 SETUP: paste your Supabase Project URL and anon public key below.
+        // Find them in your Supabase project: Settings → API.
+        const SUPABASE_URL = 'https://twtsacxbsfqsyzdeacqa.supabase.co';
+        const SUPABASE_ANON_KEY = 'sb_publishable_31AXou-5PFgkolDtJk5KbQ_zwLfUYDX';
+
+        const isSupabaseConfigured = !SUPABASE_URL.includes('YOUR_SUPABASE') && !SUPABASE_ANON_KEY.includes('YOUR_SUPABASE');
+        const db = isSupabaseConfigured ? supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+
+        // ============================================
+        // PASSWORD HASHING (client-side SHA-256 + per-user salt)
+        // The plaintext password itself never leaves the browser —
+        // only the resulting hash is sent to the server for checking.
+        // ============================================
+        async function sha256Hex(str) {
+            const enc = new TextEncoder().encode(str);
+            const buf = await crypto.subtle.digest('SHA-256', enc);
+            return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+        async function hashWithSalt(password, salt) {
+            return sha256Hex(salt + ':' + password + ':EduLearnLMS');
+        }
+        function generateSalt() {
+            return (crypto.randomUUID ? crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2)));
         }
 
         // ============================================
@@ -2208,60 +2188,52 @@
         // ============================================
         const security = new SecurityManager();
         const ADMIN_USERNAME = 'admin';
-        const ADMIN_PASSWORD = 'admin123';
-        const ADMIN_PASSWORD_HASH = security.hashPassword(ADMIN_PASSWORD);
 
-        let currentUser = null;
-        let users = [];
-        let notes = [];
+        let currentUser = null;      // logged-in profile shown in the UI
+        let adminPasswordHash = null; // cached only in memory + sessionStorage for this admin session
+        let students = [];           // admin-only roster, fetched from Supabase
+        let notes = [];              // fetched from Supabase (public read)
         let adminLockoutTimer = null;
 
         // PDF note upload state
         let activeNoteType = 'text';
         let selectedPdf = null; // { name, size, dataUrl }
-        const MAX_PDF_SIZE = 4 * 1024 * 1024; // 4 MB
+        const MAX_PDF_SIZE = 3 * 1024 * 1024; // 3 MB (kept modest to stay well under API payload limits)
 
         // ============================================
-        // SECURE STORAGE
+        // DATA REFRESH (Supabase)
         // ============================================
-        function loadSecureData() {
-            try {
-                const encryptedUsers = localStorage.getItem('lms_users_encrypted');
-                const encryptedNotes = localStorage.getItem('lms_notes_encrypted');
-                users = encryptedUsers ? security.decrypt(encryptedUsers) || [] : [];
-                notes = encryptedNotes ? security.decrypt(encryptedNotes) || [] : [];
-
-                if (!users.find(u => u.username === ADMIN_USERNAME)) {
-                    users.push({
-                        username: ADMIN_USERNAME,
-                        passwordHash: ADMIN_PASSWORD_HASH,
-                        fullName: 'System Administrator',
-                        age: 30,
-                        phone: '12345678901',
-                        gmail: 'admin@secure-lms.com',
-                        isAdmin: true,
-                        registeredAt: new Date().toISOString()
-                    });
-                    saveSecureData();
-                }
-            } catch (e) {
-                console.error('Error loading data:', e);
-                users = [];
-                notes = [];
+        async function refreshNotes() {
+            if (!db) return;
+            const { data, error } = await db.rpc('get_notes');
+            if (error) {
+                console.error('Failed to load notes:', error);
+                showAlert('Could not load notes from the server.', 'error');
+                return;
             }
+            notes = data || [];
+            renderNotes();
         }
 
-        function saveSecureData() {
-            try {
-                const encryptedUsers = security.encrypt(users);
-                const encryptedNotes = security.encrypt(notes);
-                if (encryptedUsers) localStorage.setItem('lms_users_encrypted', encryptedUsers);
-                if (encryptedNotes) localStorage.setItem('lms_notes_encrypted', encryptedNotes);
-                return true;
-            } catch (e) {
-                console.error('Error saving data:', e);
-                return false;
+        async function refreshStudents() {
+            if (!db || !currentUser || !currentUser.isAdmin) return;
+            const { data, error } = await db.rpc('admin_list_students', { p_admin_password_hash: adminPasswordHash });
+            if (error) {
+                console.error('Failed to load students:', error);
+                showAlert('Could not load student list from the server.', 'error');
+                return;
             }
+            students = data || [];
+            renderUsers();
+        }
+
+        async function refreshStats() {
+            if (!db) return;
+            const { data, error } = await db.rpc('get_public_stats');
+            if (error) { console.error(error); return; }
+            animateNumber(document.getElementById('totalUsers'), data.totalStudents || 0);
+            animateNumber(document.getElementById('totalNotes'), data.totalNotes || 0);
+            animateNumber(document.getElementById('totalCourses'), data.totalCourses || 0);
         }
 
         // ============================================
@@ -2286,25 +2258,29 @@
             }
         }
 
-        function handleAdminLogin(e) {
+        function startAdminLockoutCountdown(key) {
+            const remaining = Math.ceil(security.getLockoutTime(key) / 1000);
+            const warning = document.getElementById('adminRateLimitWarning');
+            warning.classList.add('show');
+            document.getElementById('lockoutTimer').textContent = remaining;
+            if (adminLockoutTimer) clearInterval(adminLockoutTimer);
+            adminLockoutTimer = setInterval(() => {
+                const rem = Math.ceil(security.getLockoutTime(key) / 1000);
+                document.getElementById('lockoutTimer').textContent = rem;
+                if (rem <= 0) {
+                    clearInterval(adminLockoutTimer);
+                    adminLockoutTimer = null;
+                    warning.classList.remove('show');
+                }
+            }, 1000);
+        }
+
+        async function handleAdminLogin(e) {
             e.preventDefault();
             const key = 'admin_login';
 
             if (!security.checkRateLimit(key)) {
-                const remaining = Math.ceil(security.getLockoutTime(key) / 1000);
-                const warning = document.getElementById('adminRateLimitWarning');
-                warning.classList.add('show');
-                document.getElementById('lockoutTimer').textContent = remaining;
-                if (adminLockoutTimer) clearInterval(adminLockoutTimer);
-                adminLockoutTimer = setInterval(() => {
-                    const rem = Math.ceil(security.getLockoutTime(key) / 1000);
-                    document.getElementById('lockoutTimer').textContent = rem;
-                    if (rem <= 0) {
-                        clearInterval(adminLockoutTimer);
-                        adminLockoutTimer = null;
-                        warning.classList.remove('show');
-                    }
-                }, 1000);
+                startAdminLockoutCountdown(key);
                 return;
             }
 
@@ -2315,17 +2291,33 @@
                 document.getElementById('adminLoginError').textContent = 'Please enter both username and password.';
                 return;
             }
+            if (username !== ADMIN_USERNAME) {
+                document.getElementById('adminLoginError').textContent = 'Invalid credentials.';
+                return;
+            }
 
-            const adminUser = users.find(u => u.username === username && u.isAdmin);
-            if (adminUser && adminUser.passwordHash === security.hashPassword(password)) {
-                currentUser = adminUser;
-                sessionStorage.setItem('lms_session', security.encrypt({
-                    username: adminUser.username,
-                    timestamp: Date.now(),
-                    csrfToken: security.csrfToken
+            const { data: salt, error: saltError } = await db.rpc('get_admin_salt');
+            if (saltError || !salt) {
+                document.getElementById('adminLoginError').textContent = 'Could not reach the server. Check your connection.';
+                return;
+            }
+            const hash = await hashWithSalt(password, salt);
+            const { data, error } = await db.rpc('admin_login', { p_password_hash: hash });
+
+            if (!error && data && data.success) {
+                currentUser = {
+                    username: ADMIN_USERNAME,
+                    fullName: 'System Administrator',
+                    isAdmin: true
+                };
+                adminPasswordHash = hash;
+                sessionStorage.setItem('lms_session', JSON.stringify({
+                    type: 'admin',
+                    adminPasswordHash: hash,
+                    timestamp: Date.now()
                 }));
                 closeAdminLogin();
-                showDashboard();
+                await showDashboard();
                 showAlert('Admin login successful! Welcome to the control panel.', 'success');
                 adminLoginAttempts = 0;
             } else {
@@ -2334,20 +2326,7 @@
                 document.getElementById('adminLoginError').textContent =
                     `Invalid credentials! (Attempt ${adminLoginAttempts}/${security.maxLoginAttempts})`;
                 if (!security.checkRateLimit(key)) {
-                    const remaining = Math.ceil(security.getLockoutTime(key) / 1000);
-                    const warning = document.getElementById('adminRateLimitWarning');
-                    warning.classList.add('show');
-                    document.getElementById('lockoutTimer').textContent = remaining;
-                    if (adminLockoutTimer) clearInterval(adminLockoutTimer);
-                    adminLockoutTimer = setInterval(() => {
-                        const rem = Math.ceil(security.getLockoutTime(key) / 1000);
-                        document.getElementById('lockoutTimer').textContent = rem;
-                        if (rem <= 0) {
-                            clearInterval(adminLockoutTimer);
-                            adminLockoutTimer = null;
-                            warning.classList.remove('show');
-                        }
-                    }, 1000);
+                    startAdminLockoutCountdown(key);
                 }
             }
         }
@@ -2433,7 +2412,7 @@
             }
         }
 
-        function handleLogin(e) {
+        async function handleLogin(e) {
             e.preventDefault();
             const key = 'student_login';
             if (!security.checkRateLimit(key)) {
@@ -2451,15 +2430,25 @@
                 showAlert('Admin login is through the secure portal only!', 'error');
                 return;
             }
-            const user = users.find(u => u.username === username && !u.isAdmin);
-            if (user && user.passwordHash === security.hashPassword(password)) {
-                currentUser = user;
-                sessionStorage.setItem('lms_session', security.encrypt({
-                    username: user.username,
-                    timestamp: Date.now(),
-                    csrfToken: security.csrfToken
+            if (!db) { showAlert('Server is not configured yet. See setup instructions.', 'error'); return; }
+
+            const { data: salt } = await db.rpc('get_login_salt', { p_username: username });
+            if (!salt) {
+                security.recordFailedAttempt(key);
+                showAlert('Invalid username or password!', 'error');
+                return;
+            }
+            const hash = await hashWithSalt(password, salt);
+            const { data, error } = await db.rpc('student_login', { p_username: username, p_password_hash: hash });
+
+            if (!error && data && data.success) {
+                currentUser = { ...data.student, isAdmin: false };
+                sessionStorage.setItem('lms_session', JSON.stringify({
+                    type: 'student',
+                    student: currentUser,
+                    timestamp: Date.now()
                 }));
-                showDashboard();
+                await showDashboard();
                 showAlert('Welcome back! Login successful.', 'success');
             } else {
                 security.recordFailedAttempt(key);
@@ -2467,7 +2456,7 @@
             }
         }
 
-        function handleRegister(e) {
+        async function handleRegister(e) {
             e.preventDefault();
             const username = document.getElementById('username').value.trim();
             const password = document.getElementById('password').value;
@@ -2483,10 +2472,6 @@
             }
             if (!security.validateUsername(username)) {
                 showAlert('Username must be 3-20 chars (letters, numbers, underscore).', 'error');
-                return;
-            }
-            if (users.find(u => u.username === username)) {
-                showAlert('Username already exists!', 'error');
                 return;
             }
             if (username === ADMIN_USERNAME) {
@@ -2517,20 +2502,30 @@
                 showAlert('Please enter a valid Gmail address.', 'error');
                 return;
             }
+            if (!db) { showAlert('Server is not configured yet. See setup instructions.', 'error'); return; }
 
-            const newUser = {
-                username,
-                passwordHash: security.hashPassword(password),
-                fullName: security.sanitizeInput(fullName),
-                age: parseInt(age),
-                phone: security.sanitizeInput(phone),
-                gmail: security.sanitizeInput(gmail),
-                isAdmin: false,
-                registeredAt: new Date().toISOString(),
-                lastLogin: null
-            };
-            users.push(newUser);
-            saveSecureData();
+            const salt = generateSalt();
+            const hash = await hashWithSalt(password, salt);
+
+            const { data, error } = await db.rpc('register_student', {
+                p_full_name: fullName,
+                p_age: parseInt(age),
+                p_phone: phone,
+                p_gmail: gmail,
+                p_username: username,
+                p_password_hash: hash,
+                p_salt: salt
+            });
+
+            if (error) {
+                showAlert('Registration failed. Please try again.', 'error');
+                return;
+            }
+            if (!data.success) {
+                showAlert(data.message || 'Registration failed.', 'error');
+                return;
+            }
+
             showAlert('Registration successful! Please login.', 'success');
             showAuth('login');
             document.getElementById('username').value = username;
@@ -2540,7 +2535,7 @@
         // ============================================
         // DASHBOARD
         // ============================================
-        function showDashboard() {
+        async function showDashboard() {
             document.getElementById('authSection').classList.add('hidden');
             document.getElementById('dashboardSection').classList.remove('hidden');
             document.getElementById('logoutBtn').classList.remove('hidden');
@@ -2564,15 +2559,9 @@
                 roleText.textContent = 'Student · Access your learning materials';
             }
 
-            const user = users.find(u => u.username === currentUser.username);
-            if (user) {
-                user.lastLogin = new Date().toISOString();
-                saveSecureData();
-            }
-
-            renderUsers();
-            renderNotes();
-            updateStats();
+            await refreshNotes();
+            if (currentUser.isAdmin) await refreshStudents();
+            await refreshStats();
             security.startSessionTimer();
         }
 
@@ -2583,17 +2572,20 @@
             }
             sessionStorage.removeItem('lms_session');
             currentUser = null;
+            adminPasswordHash = null;
+            students = [];
+            notes = [];
             showAuth('login');
             showAlert('Logged out successfully.', 'success');
         }
 
         // ============================================
-        // RENDER USERS
+        // RENDER USERS (admin only)
         // ============================================
         function renderUsers() {
             const container = document.getElementById('usersList');
             const searchTerm = document.getElementById('searchUsers').value.toLowerCase();
-            let filtered = users.filter(u => u.username !== ADMIN_USERNAME);
+            let filtered = students;
             if (searchTerm) {
                 filtered = filtered.filter(u =>
                     u.username.toLowerCase().includes(searchTerm) ||
@@ -2646,20 +2638,22 @@
 
         function filterUsers() { renderUsers(); }
 
-        function deleteUser(username) {
+        async function deleteUser(username) {
             if (!currentUser || !currentUser.isAdmin) {
                 showAlert('Only admin can delete users!', 'error');
                 return;
             }
-            if (username === ADMIN_USERNAME) {
-                showAlert('Cannot delete admin account!', 'error');
+            if (!confirm(`⚠️ Delete user "${username}"? This cannot be undone!`)) return;
+            const { data, error } = await db.rpc('admin_delete_student', {
+                p_admin_password_hash: adminPasswordHash,
+                p_username: username
+            });
+            if (error || !data || !data.success) {
+                showAlert('Could not delete student.', 'error');
                 return;
             }
-            if (!confirm(`⚠️ Delete user "${username}"? This cannot be undone!`)) return;
-            users = users.filter(u => u.username !== username);
-            saveSecureData();
-            renderUsers();
-            updateStats();
+            await refreshStudents();
+            await refreshStats();
             showAlert('User deleted successfully.', 'success');
         }
 
@@ -2669,7 +2663,7 @@
         let detailModalUsername = null;
 
         function viewUserDetails(username) {
-            const user = users.find(u => u.username === username);
+            const user = students.find(u => u.username === username);
             if (!user) return;
             detailModalUsername = username;
             document.getElementById('detailAvatar').textContent = user.fullName.charAt(0).toUpperCase();
@@ -2703,7 +2697,6 @@
                 showAlert('Only admin can export student data!', 'error');
                 return;
             }
-            const students = users.filter(u => u.username !== ADMIN_USERNAME);
             if (students.length === 0) {
                 showAlert('No student data to export yet.', 'warning');
                 return;
@@ -2741,7 +2734,7 @@
             strengthEl.innerHTML = `<span style="color:${colors[score]}; font-size:12px; font-weight:600;">${labels[score]}</span>`;
         }
 
-        function changeAdminPassword(e) {
+        async function changeAdminPassword(e) {
             e.preventDefault();
             if (!currentUser || !currentUser.isAdmin) {
                 showAlert('Only admin can change the admin password!', 'error');
@@ -2751,11 +2744,6 @@
             const next = document.getElementById('newAdminPassword').value;
             const confirmVal = document.getElementById('confirmAdminPassword').value;
 
-            const adminUser = users.find(u => u.username === currentUser.username && u.isAdmin);
-            if (!adminUser || adminUser.passwordHash !== security.hashPassword(current)) {
-                showAlert('Current password is incorrect.', 'error');
-                return;
-            }
             if (!security.validatePassword(next)) {
                 showAlert('New password must be 8+ chars with uppercase, lowercase, number & special char.', 'error');
                 return;
@@ -2769,13 +2757,29 @@
                 return;
             }
 
-            adminUser.passwordHash = security.hashPassword(next);
-            currentUser = adminUser;
-            const saved = saveSecureData();
-            if (!saved) {
-                showAlert('Could not save the new password. Please try again.', 'error');
+            const { data: salt } = await db.rpc('get_admin_salt');
+            const currentHash = await hashWithSalt(current, salt);
+            const newSalt = generateSalt();
+            const newHash = await hashWithSalt(next, newSalt);
+
+            const { data, error } = await db.rpc('admin_change_password', {
+                p_current_hash: currentHash,
+                p_new_hash: newHash,
+                p_new_salt: newSalt
+            });
+
+            if (error || !data || !data.success) {
+                showAlert((data && data.message) || 'Could not update password.', 'error');
                 return;
             }
+
+            adminPasswordHash = newHash;
+            sessionStorage.setItem('lms_session', JSON.stringify({
+                type: 'admin',
+                adminPasswordHash: newHash,
+                timestamp: Date.now()
+            }));
+
             document.getElementById('changePasswordForm').reset();
             document.getElementById('newAdminPasswordStrength').innerHTML = '';
             showAlert('Admin password updated successfully! Use it next time you log in.', 'success');
@@ -2791,7 +2795,7 @@
             if (searchTerm) {
                 filtered = filtered.filter(n =>
                     n.title.toLowerCase().includes(searchTerm) ||
-                    n.content.toLowerCase().includes(searchTerm) ||
+                    (n.content || '').toLowerCase().includes(searchTerm) ||
                     n.course.toLowerCase().includes(searchTerm)
                 );
             }
@@ -2815,7 +2819,7 @@
                             <span class="course-tag">${security.sanitizeInput(note.course)}</span>
                         </div>
                         ${currentUser && currentUser.isAdmin ? `
-                            <button class="btn btn-danger btn-xs" onclick="deleteNote('${note.id}')">
+                            <button class="btn btn-danger btn-xs" onclick="deleteNote(${note.id})">
                                 <i class="fas fa-times"></i>
                             </button>
                         ` : ''}
@@ -2901,7 +2905,7 @@
             if (fileInput) fileInput.value = '';
         }
 
-        function addNote() {
+        async function addNote() {
             if (!currentUser || !currentUser.isAdmin) {
                 showAlert('Only admin can add notes!', 'error');
                 return;
@@ -2918,7 +2922,9 @@
                 return;
             }
 
-            let newNote;
+            const author = currentUser.fullName || currentUser.username;
+            let result;
+            const publishedType = activeNoteType;
 
             if (activeNoteType === 'pdf') {
                 if (!selectedPdf) {
@@ -2930,18 +2936,16 @@
                     showAlert('Description is too long (max 2000 characters).', 'error');
                     return;
                 }
-                newNote = {
-                    id: security.generateSecureId(),
-                    type: 'pdf',
-                    title: security.sanitizeInput(title),
-                    course: security.sanitizeInput(course),
-                    content: security.sanitizeInput(desc),
-                    fileName: selectedPdf.name,
-                    fileSize: selectedPdf.size,
-                    fileData: selectedPdf.dataUrl,
-                    author: currentUser.fullName || currentUser.username,
-                    date: new Date().toISOString()
-                };
+                result = await db.rpc('admin_add_pdf_note', {
+                    p_admin_password_hash: adminPasswordHash,
+                    p_title: title,
+                    p_course: course,
+                    p_content: desc,
+                    p_file_name: selectedPdf.name,
+                    p_file_size: selectedPdf.size,
+                    p_file_data: selectedPdf.dataUrl,
+                    p_author: author
+                });
             } else {
                 const content = document.getElementById('noteContent').value.trim();
                 if (!content) {
@@ -2952,47 +2956,48 @@
                     showAlert('Content is too long (max 2000 characters).', 'error');
                     return;
                 }
-                newNote = {
-                    id: security.generateSecureId(),
-                    type: 'text',
-                    title: security.sanitizeInput(title),
-                    course: security.sanitizeInput(course),
-                    content: security.sanitizeInput(content),
-                    author: currentUser.fullName || currentUser.username,
-                    date: new Date().toISOString()
-                };
+                result = await db.rpc('admin_add_text_note', {
+                    p_admin_password_hash: adminPasswordHash,
+                    p_title: title,
+                    p_course: course,
+                    p_content: content,
+                    p_author: author
+                });
             }
 
-            notes.push(newNote);
-            const saved = saveSecureData();
-            if (!saved) {
-                notes.pop();
-                showAlert('Could not save this note — your browser storage is full. Try a smaller PDF.', 'error');
+            const { data, error } = result;
+            if (error || !data || !data.success) {
+                showAlert('Could not save this note. It may be too large — try a smaller PDF, or check your connection.', 'error');
                 return;
             }
 
-            const publishedType = activeNoteType;
             document.getElementById('noteTitle').value = '';
             document.getElementById('noteCourse').value = '';
             document.getElementById('noteContent').value = '';
             document.getElementById('notePdfDesc').value = '';
             clearSelectedPdf();
             switchNoteType('text');
-            renderNotes();
-            updateStats();
+            await refreshNotes();
+            await refreshStats();
             showAlert(publishedType === 'pdf' ? 'PDF note published successfully!' : 'Note published successfully!', 'success');
         }
 
-        function deleteNote(noteId) {
+        async function deleteNote(noteId) {
             if (!currentUser || !currentUser.isAdmin) {
                 showAlert('Only admin can delete notes!', 'error');
                 return;
             }
             if (!confirm('⚠️ Delete this note? This cannot be undone!')) return;
-            notes = notes.filter(n => n.id !== noteId);
-            saveSecureData();
-            renderNotes();
-            updateStats();
+            const { data, error } = await db.rpc('admin_delete_note', {
+                p_admin_password_hash: adminPasswordHash,
+                p_note_id: noteId
+            });
+            if (error || !data || !data.success) {
+                showAlert('Could not delete note.', 'error');
+                return;
+            }
+            await refreshNotes();
+            await refreshStats();
             showAlert('Note deleted successfully.', 'success');
         }
 
@@ -3013,13 +3018,6 @@
                 else el.textContent = target;
             }
             requestAnimationFrame(step);
-        }
-
-        function updateStats() {
-            animateNumber(document.getElementById('totalUsers'), users.filter(u => u.username !== ADMIN_USERNAME).length);
-            animateNumber(document.getElementById('totalNotes'), notes.length);
-            const uniqueCourses = new Set(notes.map(n => n.course));
-            animateNumber(document.getElementById('totalCourses'), uniqueCourses.size);
         }
 
         // ============================================
@@ -3046,34 +3044,53 @@
         // ============================================
         function restoreSession() {
             try {
-                const data = sessionStorage.getItem('lms_session');
-                if (!data) return false;
-                const decrypted = security.decrypt(data);
-                if (!decrypted) return false;
-                const elapsed = Date.now() - decrypted.timestamp;
+                const raw = sessionStorage.getItem('lms_session');
+                if (!raw) return false;
+                const parsed = JSON.parse(raw);
+                const elapsed = Date.now() - parsed.timestamp;
                 if (elapsed > security.sessionTimeout) {
                     sessionStorage.removeItem('lms_session');
                     return false;
                 }
-                if (!security.verifyCSRFToken(decrypted.csrfToken)) {
-                    sessionStorage.removeItem('lms_session');
-                    return false;
+                if (parsed.type === 'admin') {
+                    currentUser = { username: ADMIN_USERNAME, fullName: 'System Administrator', isAdmin: true };
+                    adminPasswordHash = parsed.adminPasswordHash;
+                    return true;
                 }
-                const user = users.find(u => u.username === decrypted.username);
-                if (!user) {
-                    sessionStorage.removeItem('lms_session');
-                    return false;
+                if (parsed.type === 'student' && parsed.student) {
+                    currentUser = { ...parsed.student, isAdmin: false };
+                    return true;
                 }
-                currentUser = user;
-                return true;
+                return false;
             } catch (e) {
                 return false;
             }
         }
 
         // ============================================
-        // INIT
+        // SETUP NOTICE (shown if Supabase isn't configured yet)
         // ============================================
+        function showSetupNotice() {
+            document.getElementById('authSection').classList.add('hidden');
+            document.getElementById('dashboardSection').classList.add('hidden');
+            const notice = document.createElement('div');
+            notice.style.cssText = 'max-width:560px;margin:60px auto;background:white;border-radius:16px;padding:32px;box-shadow:var(--shadow-lg);position:relative;z-index:1;';
+            notice.innerHTML = `
+                <h2 style="margin-bottom:12px;">⚙️ One step left: connect your database</h2>
+                <p style="color:var(--gray-500);margin-bottom:16px;line-height:1.6;">
+                    This LMS needs a shared database so every student and every note
+                    is visible to everyone, on every device — not just stored in one browser.
+                </p>
+                <p style="color:var(--gray-500);margin-bottom:16px;line-height:1.6;">
+                    Open <code>index.html</code>, find <code>SUPABASE_URL</code> and
+                    <code>SUPABASE_ANON_KEY</code> near the top of the script, and paste in
+                    your Supabase project's values (Settings → API). Run the included
+                    <code>supabase-setup.sql</code> once in your Supabase SQL Editor first.
+                </p>
+            `;
+            document.querySelector('.app-container').appendChild(notice);
+        }
+
         // ============================================
         // DRAG & DROP FOR PDF DROPZONE
         // ============================================
@@ -3131,15 +3148,23 @@
             if (e.target === this) closeStudentDetail();
         });
 
-        function init() {
+        async function init() {
             setupPdfDropzone();
             setupRippleEffect();
-            loadSecureData();
+
+            if (!isSupabaseConfigured) {
+                showAuth('login');
+                showSetupNotice();
+                console.warn('⚠️ Supabase is not configured. Edit SUPABASE_URL / SUPABASE_ANON_KEY at the top of the script.');
+                return;
+            }
+
             if (restoreSession()) {
-                showDashboard();
+                await showDashboard();
                 showAlert('Welcome back!', 'success');
             } else {
                 showAuth('login');
+                await refreshStats();
             }
             document.addEventListener('contextmenu', function(e) {
                 if (e.target.closest('.admin-login-trigger') || e.target.closest('.admin-login-modal')) {
@@ -3148,7 +3173,6 @@
             });
             console.log('🎓 EduLearn Pro LMS Started');
             console.log('👑 Admin: Click crown icon (bottom-right)');
-            console.log('🔑 Credentials: admin / admin123');
             console.log('📋 Age: 12-20 | Phone: 11-13 digits');
         }
 
