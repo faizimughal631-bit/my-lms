@@ -3215,12 +3215,12 @@
   var DEFAULT_COURSE_NAME = "EduLearn"; // shown in the assistant's intro message
   // =================================================================
 
-  var STORAGE_KEY = "lms_chatbot_config_v1";
+  var STORAGE_KEY = "lms_chatbot_config_v2";
   var LOG_KEY = "lms_chatbot_logs_v1";
   var HISTORY_KEY = "lms_chatbot_history_v1";
 
   var defaultConfig = {
-    mode: "faq", // "faq" or "ai"
+    mode: "ai",
     geminiApiKey: "",
     faqs: [
       { q: "how do i submit an assignment", a: "Go to your course page, open the assignment, and click the 'Submit' or 'Upload' button. Make sure to submit before the due date shown on the assignment page." },
