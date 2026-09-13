@@ -3221,7 +3221,8 @@
 
   var defaultConfig = {
     mode: "ai",
-    geminiApiKey: "",
+    supabaseUrl: "https://twtsacxbsfqsyzdeacqa.supabase.co",
+  supabaseAnonKey: "sb_publishable_31AXou-5PFgkolDtJk5KbQ_zwLfUYDX",
     faqs: [
       { q: "how do i submit an assignment", a: "Go to your course page, open the assignment, and click the 'Submit' or 'Upload' button. Make sure to submit before the due date shown on the assignment page." },
       { q: "how do i reset my password", a: "Click 'Forgot password?' on the login page and follow the email instructions. If you don't get an email within a few minutes, check your spam folder or contact your instructor." },
@@ -3548,12 +3549,15 @@
       "Keep answers short and clear (under ~120 words) unless asked for detail. " +
       "Here is the school's FAQ knowledge base to prefer when relevant:\n\n" + faqContext;
 
-    return fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=" + encodeURIComponent(config.geminiApiKey), {
+    return fetch(`${config.supabaseUrl}/functions/v1/Gemini`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${config.supabaseAnonKey}`
+      },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: question }] }],
-        systemInstruction: { parts: [{ text: systemPrompt }] }
+        question: question,
+        systemPrompt: systemPrompt
       })
     })
     .then(function (r) { return r.json(); })
