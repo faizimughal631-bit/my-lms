@@ -3215,7 +3215,7 @@
   var DEFAULT_COURSE_NAME = "EduLearn"; // shown in the assistant's intro message
   // =================================================================
 
-  var STORAGE_KEY = "lms_chatbot_config_v2";
+  var STORAGE_KEY = "lms_chatbot_config_v3";
   var LOG_KEY = "lms_chatbot_logs_v1";
   var HISTORY_KEY = "lms_chatbot_history_v1";
 
@@ -3582,7 +3582,7 @@
 
     var typingEl = addMessage("Thinking…", "bot typing", false);
 
-    if (config.mode === "ai" && config.geminiApiKey) {
+    if (config.mode === "ai" && config.supabaseUrl && config.supabaseAnonKey) {
       callGemini(text)
         .then(function (answer) {
           typingEl.remove();
