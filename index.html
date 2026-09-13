@@ -3548,7 +3548,7 @@
       "Keep answers short and clear (under ~120 words) unless asked for detail. " +
       "Here is the school's FAQ knowledge base to prefer when relevant:\n\n" + faqContext;
 
-    return fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + encodeURIComponent(config.geminiApiKey), {
+    return fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=" + encodeURIComponent(config.geminiApiKey), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
