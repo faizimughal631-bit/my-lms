@@ -3203,5 +3203,531 @@
 
         document.addEventListener('DOMContentLoaded', init);
     </script>
+    3. That's it. A round chat icon will appear in the bottom-left corner.
+
+  ADMIN SETUP (do this once):
+  - Click the chat icon → click the small gear/settings icon in the chat
+    header → an admin panel opens.
+  - Default admin password is:  admin123   (CHANGE THIS — see ADMIN_PASSWORD
+    below, search for it in this file and set your own).
+  - In the admin panel you can:
+      • Turn "Free AI (Gemini)" mode ON/OFF
+      • Paste your free Gemini API key (get one at https://aistudio.google.com/apikey)
+      • Edit the FAQ knowledge base (question/answer pairs used when AI mode
+        is off, and also given to the AI as extra context when it's on)
+      • View a log of student questions asked (stored on each student's
+        own browser — this is a lightweight local log, not a central database)
+
+  COST: Google's Gemini API free tier requires no credit card and no
+  payment. Reasonable classroom-scale usage stays within the free limits.
+  If you exceed them Google will simply rate-limit responses, never charge you
+  unless you separately enable billing.
+-->
+
+<div id="lms-chatbot-root"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ================== ADMIN CONFIG — EDIT THESE ==================
+  var ADMIN_PASSWORD = "admin123"; // <-- CHANGE THIS to your own password
+  var DEFAULT_COURSE_NAME = "your course"; // shown in the assistant's intro message
+  // =================================================================
+
+  var STORAGE_KEY = "lms_chatbot_config_v1";
+  var LOG_KEY = "lms_chatbot_logs_v1";
+  var HISTORY_KEY = "lms_chatbot_history_v1";
+
+  var defaultConfig = {
+    mode: "faq", // "faq" or "ai"
+    geminiApiKey: "",
+    faqs: [
+      { q: "how do i submit an assignment", a: "Go to your course page, open the assignment, and click the 'Submit' or 'Upload' button. Make sure to submit before the due date shown on the assignment page." },
+      { q: "how do i reset my password", a: "Click 'Forgot password?' on the login page and follow the email instructions. If you don't get an email within a few minutes, check your spam folder or contact your instructor." },
+      { q: "where can i see my grades", a: "Your grades are listed under the 'Grades' or 'Progress' tab on your dashboard, usually visible after you log in." },
+      { q: "how do i contact my instructor", a: "Use the messaging or 'Contact Instructor' option inside your course page, or check the syllabus for their email address." },
+      { q: "when is the deadline", a: "Deadlines are listed on each assignment or course page. Check the course calendar or the assignment details for the exact due date." },
+      { q: "how do i join a live class", a: "Live class links are usually posted on the course homepage or in announcements shortly before the session starts." },
+      { q: "i can't log in", a: "Double-check your username and password. If it still doesn't work, use 'Forgot password?' or contact support/your instructor to reset your account." },
+      { q: "how do i download course materials", a: "Open your course, go to the 'Materials' or 'Resources' section, and click on a file to download it." }
+    ]
+  };
+
+  function loadConfig() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return JSON.parse(JSON.stringify(defaultConfig));
+      var parsed = JSON.parse(raw);
+      return Object.assign(JSON.parse(JSON.stringify(defaultConfig)), parsed);
+    } catch (e) {
+      return JSON.parse(JSON.stringify(defaultConfig));
+    }
+  }
+  function saveConfig(cfg) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+  }
+  function loadHistory() {
+    try { return JSON.parse(localStorage.getItem(HISTORY_KEY)) || []; }
+    catch (e) { return []; }
+  }
+  function saveHistory(h) {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(h.slice(-40)));
+  }
+  function logQuestion(text) {
+    try {
+      var logs = JSON.parse(localStorage.getItem(LOG_KEY)) || [];
+      logs.push({ q: text, t: new Date().toISOString() });
+      localStorage.setItem(LOG_KEY, JSON.stringify(logs.slice(-200)));
+    } catch (e) {}
+  }
+
+  var config = loadConfig();
+  var chatHistory = loadHistory();
+
+  // ================== STYLES ==================
+  var style = document.createElement("style");
+  style.textContent = `
+    #lms-chatbot-root, #lms-chatbot-root * { box-sizing: border-box; }
+    #lms-chat-launcher {
+      position: fixed; left: 24px; bottom: 24px; z-index: 999998;
+      width: 60px; height: 60px; border-radius: 50%;
+      background: linear-gradient(135deg, #2E5E4E, #1F3D33);
+      box-shadow: 0 6px 20px rgba(20,40,35,0.35);
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; border: none; transition: transform .15s ease, box-shadow .15s ease;
+    }
+    #lms-chat-launcher:hover { transform: translateY(-2px); box-shadow: 0 10px 26px rgba(20,40,35,0.42); }
+    #lms-chat-launcher svg { width: 28px; height: 28px; }
+    #lms-chat-badge {
+      position: absolute; top: -2px; right: -2px; background: #E0A458;
+      color: #1F3D33; font: 700 11px/1 system-ui, sans-serif; padding: 3px 5px;
+      border-radius: 10px; border: 2px solid #fff;
+    }
+    #lms-chat-panel {
+      position: fixed; left: 24px; bottom: 96px; z-index: 999999;
+      width: 360px; max-width: calc(100vw - 32px); height: 520px; max-height: calc(100vh - 140px);
+      background: #FBF9F4; border-radius: 16px; overflow: hidden;
+      box-shadow: 0 20px 50px rgba(20,40,35,0.28);
+      display: none; flex-direction: column;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      border: 1px solid rgba(20,40,35,0.08);
+    }
+    #lms-chat-panel.open { display: flex; }
+    #lms-chat-header {
+      background: linear-gradient(135deg, #2E5E4E, #1F3D33); color: #FBF9F4;
+      padding: 14px 14px 14px 16px; display: flex; align-items: center; gap: 10px;
+    }
+    #lms-chat-header .title { font-weight: 600; font-size: 15px; flex: 1; }
+    #lms-chat-header .subtitle { font-size: 11px; opacity: 0.75; margin-top: 1px; }
+    .lms-icon-btn {
+      background: rgba(255,255,255,0.12); border: none; color: #FBF9F4; width: 30px; height: 30px;
+      border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+    }
+    .lms-icon-btn:hover { background: rgba(255,255,255,0.22); }
+    #lms-chat-messages {
+      flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px;
+      background: #FBF9F4;
+    }
+    .lms-msg { max-width: 82%; padding: 9px 13px; border-radius: 14px; font-size: 13.5px; line-height: 1.45; white-space: pre-wrap; }
+    .lms-msg.bot { background: #EFEAE0; color: #26302C; align-self: flex-start; border-bottom-left-radius: 4px; }
+    .lms-msg.user { background: #2E5E4E; color: #fff; align-self: flex-end; border-bottom-right-radius: 4px; }
+    .lms-msg.typing { color: #7A8580; font-style: italic; }
+    #lms-chat-suggestions { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 10px; }
+    .lms-suggestion {
+      background: #fff; border: 1px solid #DDD6C7; color: #2E5E4E; font-size: 12px;
+      padding: 6px 10px; border-radius: 100px; cursor: pointer;
+    }
+    .lms-suggestion:hover { background: #EFEAE0; }
+    #lms-chat-inputbar { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #EAE4D6; background: #FBF9F4; }
+    #lms-chat-input {
+      flex: 1; border: 1px solid #DDD6C7; border-radius: 10px; padding: 10px 12px;
+      font-size: 13.5px; resize: none; font-family: inherit; outline: none;
+    }
+    #lms-chat-input:focus { border-color: #2E5E4E; }
+    #lms-chat-send {
+      background: #2E5E4E; color: #fff; border: none; border-radius: 10px; width: 42px;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+    }
+    #lms-chat-send:hover { background: #24493c; }
+    #lms-chat-send:disabled { opacity: 0.5; cursor: default; }
+    #lms-chat-mode-pill {
+      font-size: 10px; padding: 2px 8px; border-radius: 100px; background: rgba(255,255,255,0.15);
+    }
+
+    /* Admin panel */
+    #lms-admin-overlay {
+      position: fixed; inset: 0; background: rgba(20,25,22,0.5); z-index: 1000000;
+      display: none; align-items: center; justify-content: center; padding: 20px;
+    }
+    #lms-admin-overlay.open { display: flex; }
+    #lms-admin-modal {
+      background: #FBF9F4; width: 480px; max-width: 100%; max-height: 85vh; overflow-y: auto;
+      border-radius: 14px; padding: 22px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    #lms-admin-modal h2 { margin: 0 0 4px; font-size: 18px; color: #1F3D33; }
+    #lms-admin-modal p.sub { margin: 0 0 18px; font-size: 12.5px; color: #7A8580; }
+    .lms-admin-label { font-size: 12px; font-weight: 600; color: #26302C; margin: 14px 0 6px; display: block; }
+    .lms-admin-input, .lms-admin-textarea {
+      width: 100%; border: 1px solid #DDD6C7; border-radius: 8px; padding: 8px 10px; font-size: 13px;
+      font-family: inherit; outline: none;
+    }
+    .lms-admin-textarea { resize: vertical; }
+    .lms-toggle-row { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; }
+    .lms-switch { position: relative; width: 42px; height: 24px; }
+    .lms-switch input { opacity: 0; width: 0; height: 0; }
+    .lms-slider { position: absolute; inset: 0; background: #DDD6C7; border-radius: 100px; cursor: pointer; transition: .2s; }
+    .lms-slider:before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; background: white; border-radius: 50%; transition: .2s; }
+    .lms-switch input:checked + .lms-slider { background: #2E5E4E; }
+    .lms-switch input:checked + .lms-slider:before { transform: translateX(18px); }
+    .lms-faq-item { border: 1px solid #EAE4D6; border-radius: 8px; padding: 10px; margin-top: 8px; background: #fff; }
+    .lms-faq-item input, .lms-faq-item textarea { margin-top: 4px; }
+    .lms-remove-faq { background: none; border: none; color: #B5533C; font-size: 11px; cursor: pointer; margin-top: 6px; }
+    #lms-admin-actions { display: flex; gap: 8px; margin-top: 18px; }
+    .lms-btn-primary { background: #2E5E4E; color: #fff; border: none; padding: 9px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; font-weight: 600; }
+    .lms-btn-secondary { background: #EFEAE0; color: #26302C; border: none; padding: 9px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; }
+    #lms-admin-lock { text-align: center; }
+    #lms-admin-lock input { text-align: center; letter-spacing: 2px; }
+    .lms-hint { font-size: 11px; color: #7A8580; margin-top: 4px; }
+    #lms-log-list { max-height: 160px; overflow-y: auto; border: 1px solid #EAE4D6; border-radius: 8px; padding: 8px; background: #fff; font-size: 12px; }
+    #lms-log-list div { padding: 4px 0; border-bottom: 1px dashed #EAE4D6; }
+  `;
+  document.head.appendChild(style);
+
+  // ================== MARKUP ==================
+  var root = document.getElementById("lms-chatbot-root");
+  root.innerHTML = `
+    <button id="lms-chat-launcher" aria-label="Open study assistant chat">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#FBF9F4" stroke-width="1.8">
+        <path d="M4 4h16v12H7l-3 3V4z" stroke-linejoin="round"/>
+        <circle cx="9" cy="10" r="0.8" fill="#FBF9F4"/>
+        <circle cx="12" cy="10" r="0.8" fill="#FBF9F4"/>
+        <circle cx="15" cy="10" r="0.8" fill="#FBF9F4"/>
+      </svg>
+    </button>
+
+    <div id="lms-chat-panel">
+      <div id="lms-chat-header">
+        <div>
+          <div class="title">Study Assistant</div>
+          <div class="subtitle"><span id="lms-chat-mode-label">FAQ mode</span></div>
+        </div>
+        <button class="lms-icon-btn" id="lms-admin-open" title="Admin settings">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#FBF9F4" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.9 2.9l-.1-.1a1.7 1.7 0 00-1.9-.3 1.7 1.7 0 00-1 1.6V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1-1.6 1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.9-2.9l.1-.1a1.7 1.7 0 00.3-1.9 1.7 1.7 0 00-1.6-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.6-1 1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.9-2.9l.1.1a1.7 1.7 0 001.9.3H9a1.7 1.7 0 001-1.6V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.6 1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.9 2.9l-.1.1a1.7 1.7 0 00-.3 1.9V9a1.7 1.7 0 001.6 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.6 1z"/></svg>
+        </button>
+        <button class="lms-icon-btn" id="lms-chat-close" title="Close">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#FBF9F4" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div id="lms-chat-messages"></div>
+      <div id="lms-chat-suggestions"></div>
+      <div id="lms-chat-inputbar">
+        <textarea id="lms-chat-input" rows="1" placeholder="Ask a question…"></textarea>
+        <button id="lms-chat-send" aria-label="Send">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#fff" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div id="lms-admin-overlay">
+      <div id="lms-admin-modal">
+        <div id="lms-admin-lock">
+          <h2>Admin Access</h2>
+          <p class="sub">Enter the admin password to manage the study assistant.</p>
+          <input type="password" id="lms-admin-password" class="lms-admin-input" placeholder="Password" />
+          <div id="lms-admin-actions">
+            <button class="lms-btn-primary" id="lms-admin-unlock">Unlock</button>
+            <button class="lms-btn-secondary" id="lms-admin-cancel">Cancel</button>
+          </div>
+          <p class="lms-hint" id="lms-admin-error"></p>
+        </div>
+
+        <div id="lms-admin-panel" style="display:none;">
+          <h2>Assistant Settings</h2>
+          <p class="sub">Changes save to this browser/device and apply immediately.</p>
+
+          <div class="lms-toggle-row">
+            <div>
+              <div style="font-size:13px;font-weight:600;">Use free AI (Gemini)</div>
+              <div class="lms-hint">Off = simple FAQ matching only. On = real AI answers.</div>
+            </div>
+            <label class="lms-switch">
+              <input type="checkbox" id="lms-mode-toggle" />
+              <span class="lms-slider"></span>
+            </label>
+          </div>
+
+          <div id="lms-gemini-key-row" style="margin-top:12px;">
+            <label class="lms-admin-label">Gemini API key</label>
+            <input type="text" id="lms-gemini-key" class="lms-admin-input" placeholder="Paste your free Gemini API key" />
+            <p class="lms-hint">Get a free key (no credit card) at <span style="text-decoration:underline;">aistudio.google.com/apikey</span></p>
+          </div>
+
+          <label class="lms-admin-label">FAQ knowledge base</label>
+          <div id="lms-faq-list"></div>
+          <button class="lms-btn-secondary" id="lms-faq-add" style="margin-top:8px;">+ Add question</button>
+
+          <label class="lms-admin-label">Recent student questions (this device)</label>
+          <div id="lms-log-list"></div>
+
+          <div id="lms-admin-actions">
+            <button class="lms-btn-primary" id="lms-admin-save">Save settings</button>
+            <button class="lms-btn-secondary" id="lms-admin-close">Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // ================== ELEMENT REFS ==================
+  var launcher = document.getElementById("lms-chat-launcher");
+  var panel = document.getElementById("lms-chat-panel");
+  var closeBtn = document.getElementById("lms-chat-close");
+  var messagesEl = document.getElementById("lms-chat-messages");
+  var suggestionsEl = document.getElementById("lms-chat-suggestions");
+  var input = document.getElementById("lms-chat-input");
+  var sendBtn = document.getElementById("lms-chat-send");
+  var modeLabel = document.getElementById("lms-chat-mode-label");
+
+  var adminOverlay = document.getElementById("lms-admin-overlay");
+  var adminOpenBtn = document.getElementById("lms-admin-open");
+  var adminLockView = document.getElementById("lms-admin-lock");
+  var adminPanelView = document.getElementById("lms-admin-panel");
+  var adminPasswordInput = document.getElementById("lms-admin-password");
+  var adminUnlockBtn = document.getElementById("lms-admin-unlock");
+  var adminCancelBtn = document.getElementById("lms-admin-cancel");
+  var adminError = document.getElementById("lms-admin-error");
+  var adminCloseBtn = document.getElementById("lms-admin-close");
+  var adminSaveBtn = document.getElementById("lms-admin-save");
+  var modeToggle = document.getElementById("lms-mode-toggle");
+  var geminiKeyInput = document.getElementById("lms-gemini-key");
+  var geminiKeyRow = document.getElementById("lms-gemini-key-row");
+  var faqListEl = document.getElementById("lms-faq-list");
+  var faqAddBtn = document.getElementById("lms-faq-add");
+  var logListEl = document.getElementById("lms-log-list");
+
+  // ================== CHAT UI LOGIC ==================
+  function updateModeLabel() {
+    modeLabel.textContent = config.mode === "ai" ? "AI-powered" : "FAQ mode";
+  }
+
+  function addMessage(text, sender, save) {
+    var div = document.createElement("div");
+    div.className = "lms-msg " + sender;
+    div.textContent = text;
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (save !== false) {
+      chatHistory.push({ text: text, sender: sender });
+      saveHistory(chatHistory);
+    }
+    return div;
+  }
+
+  function renderSuggestions() {
+    suggestionsEl.innerHTML = "";
+    var picks = config.faqs.slice(0, 3);
+    picks.forEach(function (f) {
+      var b = document.createElement("button");
+      b.className = "lms-suggestion";
+      b.textContent = f.q.charAt(0).toUpperCase() + f.q.slice(1);
+      b.onclick = function () { input.value = f.q; sendMessage(); };
+      suggestionsEl.appendChild(b);
+    });
+  }
+
+  function openPanel() {
+    panel.classList.add("open");
+    if (chatHistory.length === 0) {
+      addMessage("Hi! I'm your study assistant for " + DEFAULT_COURSE_NAME + ". Ask me about assignments, deadlines, grades, logging in, or any course concept you're stuck on.", "bot");
+    }
+    renderSuggestions();
+    input.focus();
+  }
+  launcher.onclick = openPanel;
+  closeBtn.onclick = function () { panel.classList.remove("open"); };
+
+  function findFaqAnswer(question) {
+    var qLower = question.toLowerCase();
+    var best = null, bestScore = 0;
+    config.faqs.forEach(function (f) {
+      var words = f.q.toLowerCase().split(/\s+/).filter(function(w){return w.length > 2;});
+      var score = 0;
+      words.forEach(function (w) { if (qLower.indexOf(w) !== -1) score++; });
+      if (qLower.indexOf(f.q.toLowerCase()) !== -1) score += 5;
+      if (score > bestScore) { bestScore = score; best = f; }
+    });
+    if (best && bestScore > 0) return best.a;
+    return null;
+  }
+
+  function callGemini(question) {
+    var faqContext = config.faqs.map(function (f) { return "Q: " + f.q + "\nA: " + f.a; }).join("\n\n");
+    var systemPrompt = "You are a friendly, concise study assistant for an online course (" + DEFAULT_COURSE_NAME + "). " +
+      "Help students with course navigation, deadlines, and studying/tutoring on academic topics. " +
+      "Keep answers short and clear (under ~120 words) unless asked for detail. " +
+      "Here is the school's FAQ knowledge base to prefer when relevant:\n\n" + faqContext;
+
+    return fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + encodeURIComponent(config.geminiApiKey), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: question }] }],
+        systemInstruction: { parts: [{ text: systemPrompt }] }
+      })
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      if (data && data.candidates && data.candidates[0] && data.candidates[0].content) {
+        return data.candidates[0].content.parts.map(function(p){return p.text||"";}).join("\n").trim();
+      }
+      if (data && data.error) {
+        throw new Error(data.error.message || "Gemini API error");
+      }
+      throw new Error("No response from AI");
+    });
+  }
+
+  function sendMessage() {
+    var text = input.value.trim();
+    if (!text) return;
+    addMessage(text, "user");
+    logQuestion(text);
+    input.value = "";
+    sendBtn.disabled = true;
+
+    var typingEl = addMessage("Thinking…", "bot typing", false);
+
+    if (config.mode === "ai" && config.geminiApiKey) {
+      callGemini(text)
+        .then(function (answer) {
+          typingEl.remove();
+          addMessage(answer, "bot");
+        })
+        .catch(function (err) {
+          typingEl.remove();
+          var fallback = findFaqAnswer(text);
+          if (fallback) {
+            addMessage(fallback, "bot");
+          } else {
+            addMessage("I couldn't reach the AI service right now (" + err.message + "). Please try again in a moment, or contact your instructor.", "bot");
+          }
+        })
+        .finally(function () { sendBtn.disabled = false; });
+    } else {
+      setTimeout(function () {
+        typingEl.remove();
+        var answer = findFaqAnswer(text);
+        if (answer) {
+          addMessage(answer, "bot");
+        } else {
+          addMessage("I don't have an answer for that yet. Try rephrasing, or contact your instructor directly. (Tip for admin: add this question to the FAQ list in Settings.)", "bot");
+        }
+        sendBtn.disabled = false;
+      }, 350);
+    }
+  }
+  sendBtn.onclick = sendMessage;
+  input.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  });
+  input.addEventListener("input", function () {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 90) + "px";
+  });
+
+  // ================== ADMIN PANEL LOGIC ==================
+  function openAdmin() {
+    adminOverlay.classList.add("open");
+    adminLockView.style.display = "block";
+    adminPanelView.style.display = "none";
+    adminPasswordInput.value = "";
+    adminError.textContent = "";
+  }
+  adminOpenBtn.onclick = openAdmin;
+  adminCancelBtn.onclick = function () { adminOverlay.classList.remove("open"); };
+  adminCloseBtn.onclick = function () { adminOverlay.classList.remove("open"); };
+
+  adminUnlockBtn.onclick = function () {
+    if (adminPasswordInput.value === ADMIN_PASSWORD) {
+      adminLockView.style.display = "none";
+      adminPanelView.style.display = "block";
+      renderAdminPanel();
+    } else {
+      adminError.textContent = "Incorrect password.";
+    }
+  };
+
+  function renderAdminPanel() {
+    modeToggle.checked = config.mode === "ai";
+    geminiKeyInput.value = config.geminiApiKey || "";
+    geminiKeyRow.style.opacity = modeToggle.checked ? "1" : "0.5";
+
+    faqListEl.innerHTML = "";
+    config.faqs.forEach(function (f, idx) {
+      var item = document.createElement("div");
+      item.className = "lms-faq-item";
+      item.innerHTML =
+        '<input class="lms-admin-input lms-faq-q" placeholder="Question / keywords" value="' + escapeHtml(f.q) + '" />' +
+        '<textarea class="lms-admin-textarea lms-faq-a" placeholder="Answer" rows="2">' + escapeHtml(f.a) + '</textarea>' +
+        '<button class="lms-remove-faq">Remove</button>';
+      item.querySelector(".lms-remove-faq").onclick = function () {
+        config.faqs.splice(idx, 1);
+        renderAdminPanel();
+      };
+      faqListEl.appendChild(item);
+    });
+
+    logListEl.innerHTML = "";
+    try {
+      var logs = JSON.parse(localStorage.getItem(LOG_KEY)) || [];
+      if (logs.length === 0) {
+        logListEl.innerHTML = "<div>No questions logged yet on this device.</div>";
+      } else {
+        logs.slice(-15).reverse().forEach(function (l) {
+          var d = document.createElement("div");
+          d.textContent = l.q;
+          logListEl.appendChild(d);
+        });
+      }
+    } catch (e) {}
+  }
+
+  function escapeHtml(str) {
+    return (str || "").replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  modeToggle.addEventListener("change", function () {
+    geminiKeyRow.style.opacity = modeToggle.checked ? "1" : "0.5";
+  });
+
+  faqAddBtn.onclick = function () {
+    config.faqs.push({ q: "", a: "" });
+    renderAdminPanel();
+  };
+
+  adminSaveBtn.onclick = function () {
+    config.mode = modeToggle.checked ? "ai" : "faq";
+    config.geminiApiKey = geminiKeyInput.value.trim();
+    var qs = document.querySelectorAll(".lms-faq-q");
+    var as = document.querySelectorAll(".lms-faq-a");
+    var newFaqs = [];
+    for (var i = 0; i < qs.length; i++) {
+      var q = qs[i].value.trim(), a = as[i].value.trim();
+      if (q && a) newFaqs.push({ q: q, a: a });
+    }
+    config.faqs = newFaqs;
+    saveConfig(config);
+    updateModeLabel();
+    renderSuggestions();
+    adminOverlay.classList.remove("open");
+    addMessage("(Settings updated by admin.)", "bot");
+  };
+
+  updateModeLabel();
+})();
+</script>
 </body>
 </html>
